@@ -1,0 +1,125 @@
+---
+title: "LASSO_glmnet"
+date: "`r Sys.Date()`"
+author: "ylChen"
+output:
+  rmdformats::downcute:
+    self_contained: true
+---
+
+## 0. 加载数据
+
+ * 表达量，分组
+ 
+```{r,collapse=TRUE}
+rm(list = ls()) 
+options(stringsAsFactors = F)
+library(glmnet)
+library(ggpubr)
+library(patchwork)
+
+load('../data/outTab.Rdata')
+load('../data/outTab_grouplist.Rdata')
+modules <- read.csv('../data/wgcna_genes_in_each_modules.csv')
+head(modules)
+outTab[1:4,1:4]
+head(modType)
+
+```
+
+## 1. 处理矩阵
+
+ * x，y
+
+```{r,collapse=TRUE}
+table(modules$mergedColors)
+
+#提取greenyellow模块基因
+modules <- modules[which(modules$mergedColors=='greenyellow'),]
+rownames(modules) <- modules[,1]
+a <- rownames(modules)
+modules <- modules[,-1]
+modules <- as.data.frame(modules)
+rownames(modules) <- a
+dim(modules)
+
+#提取模块基因表达量,列基因，行样本
+exprSet <- outTab[rownames(modules),]
+x <- t(exprSet)
+x[1:4,1:4]
+
+#分组，numeric
+group_list <- ifelse(grepl('CT',modType$modType),'0','1')
+y <- as.numeric(group_list)
+y
+save(x,y,file='../data/input_lasso.rdata')
+```
+
+## 3. LASSO建模
+
+ * cv.glmnet默认用十折交叉验证，挑选合适的λ值
+ * 两条虚线分别指示了两个特殊的λ值,一个是lambda.min,一个是lambda.1se,这两个值之间的lambda都认为是合适的。lambda.1se构建的模型最简单，即使用的基因数量少，而lambda.min则准确率更高一点，使用的基因数量更多一点
+ * 用这两个λ值重新建模
+ 
+```{r,collapse=TRUE}
+rm(list = ls()) 
+load('../data/input_lasso.rdata')
+#挑选合适的λ值
+#计算1000个，画图，筛选表现最好的λ值
+#alpha = 1 lasso回归，alpha = 0，岭回归
+#family=‘gaussian’拟合线性模型；‘binomial’拟合logistic模型
+cv_fit <- cv.glmnet(x=x, y=y, nlambda = 1000,alpha = 1)
+jpeg("../pic/lasso.jpg",units="in", width=9, height=6,res=650)# res规定输出idp
+plot(cv_fit)
+dev.off()
+plot(cv_fit)
+```
+
+ * 这两个值体现在参数lambda上。有了模型，可以将筛选的基因挑出来了。所有基因存放于模型的子集beta中，用到的基因有一个s0值，没用的基因只记录了“.”，所以可以用下面代码挑出用到的基因。
+
+```{r,collapse=TRUE}
+#2.2 用这两个λ值重新建模
+model_lasso_min <- glmnet(x=x, y=y, alpha = 1, lambda=cv_fit$lambda.min)
+model_lasso_1se <- glmnet(x=x, y=y, alpha = 1, lambda=cv_fit$lambda.1se)
+head(model_lasso_min$beta)
+
+choose_gene_min=rownames(model_lasso_min$beta)[as.numeric(model_lasso_min$beta)!=0]
+choose_gene_1se=rownames(model_lasso_1se$beta)[as.numeric(model_lasso_1se$beta)!=0]
+length(choose_gene_min) 
+length(choose_gene_1se) 
+
+```
+## 4. 预测自己
+
+ * newx参数是预测对象。输出结果lasso.prob是一个矩阵，第一列是min的预测结果，第二列是1se的预测结果，预测结果是概率，或者说百分比，不是绝对的0和1。
+
+ * 将每个样本的生死和预测结果放在一起，直接cbind即可
+
+```{r,collapse=TRUE}
+lasso.prob <- predict(cv_fit, newx=x , s=c(cv_fit$lambda.min,cv_fit$lambda.1se) )
+re <- cbind(y ,lasso.prob)
+head(re)
+
+```
+## 4. 箱式图选择
+
+```{r,collapse=TRUE}
+re <- as.data.frame(re)
+colnames(re) <- c('event','prob_min','prob_1se')
+re$event <- as.factor(re$event)
+ 
+p1 = ggboxplot(re, x = "event", y = "prob_min",
+               color = "event", palette = "jco",
+               add = "jitter")+ stat_compare_means()
+p2 = ggboxplot(re, x = "event", y = "prob_1se",
+               color = "event", palette = "jco",
+               add = "jitter")+ stat_compare_means()
+
+#观察点的分布，更加接近0/1分组，就选其λ
+p1+p2
+```
+
+
+
+
+
