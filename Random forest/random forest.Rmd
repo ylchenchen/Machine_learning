@@ -1,0 +1,145 @@
+---
+title: "Random Forest"
+date: "`r Sys.Date()`"
+output:
+  rmdformats::downcute:
+    self_contained: true
+---
+
+# 一、input
+
+ * 参考：https://www.listendata.com/2014/11/random-forest-with-r.html#Random-Forest-R-Code
+ * 原始数据位于http://archive.ics.uci.edu/ml/datasets/Heart+Disease
+ 
+```{r,collapse=TRUE}
+rm(list = ls())
+options(stringsAsFactors = F)
+library(ggplot2)
+#BiocManager::install('randomForest')
+library(randomForest)
+
+url <- "http://archive.ics.uci.edu/ml/machine-learning-databases/heart-disease/processed.cleveland.data"
+data <- read.csv(url, header=FALSE)
+```
+
+#  二、clean
+ * 自变量有连续，分类两种
+ 
+ * 然后我们使用str(data)看一下此时的数据结构可以发现不规范的变量有，
+
+- sex：应该是因子变量，0代表女，1代表男；
+- cp、fbs、restecg、exang、slope：应该是因子变量；
+- ca：应该使用“NA”表示缺失值，而不是“？”；
+- thal：和ca情况一样；
+- hd：因子变量，0是健康，1是心脏病；
+ 
+```{r,collapse=TRUE}
+# 取回的数据没有列名
+head(data)
+# 手动修改列名
+colnames(data) <- c(
+  "age",  "sex",  "cp",   "trestbps", 
+  "chol",   "fbs",    "restecg", 
+  "thalach",   "exang",    "oldpeak", 
+  "slope",  "ca",   "thal",  "hd" 
+) # 共14个
+
+head(data)
+
+#先将“？”更换为“NA”
+data[data=="?"]<-NA
+
+#将sex修改为正确的因子变量，并处理好性别
+data$sex <- factor(data$sex,levels = c(0,1), labels = c("F","M"))
+#将cp、fbs、restecg、exang、slope修改为因子变量
+data$cp <- as.factor(data$cp)
+data$fbs <- as.factor(data$fbs)
+data$restecg <- as.factor(data$restecg)
+data$exang <- as.factor(data$exang)
+data$slope <- as.factor(data$slope)
+
+#由于ca刚开始使用的’？‘代表的缺失值，因此ca里面的变量都是字符类型的因子变量
+#因此需要先转换为数值型，再进行因子变量转换
+data$ca <- as.integer(data$ca)
+data$ca <- as.factor(data$ca)
+#同理，将thal做同样处理
+data$thal <- as.integer(data$thal) 
+data$thal <- as.factor(data$thal)
+
+#将hd修改为因子变量，0为健康，1为不健康
+data$hd <- ifelse(data$hd == 0, "Healthy", "Unhealthy")
+data$hd <- as.factor(data$hd) 
+
+head(data)
+```
+
+
+# 三、random forest
+ 
+ * rfImpute填补缺失值
+ 
+ * rfImpute函数用于填补缺失值，随机森林的缺失值填补是根据相似度进行填补的一种迭代算法
+
+ * 简单来说，缺失值会首先根据数据类别不同进行填充，也就是数值数据填充当前变量的中位数，分类数据填充当前变量的众数。然后构建随机森林，并根据随机森林来决定所有的记录之间的相似度，最后根据相似度和当前变量的其他数据对缺失值进行填补。
+
+ * 一般上述过程会迭代4-6次，4-6次被认为是比较合理的迭代次数。
+  
+  * R中ifImpute函数默认创建300棵决策树的随机森林。
+  * 最佳子集数目根据数据类别不同进行设定，数值数据为总变量数除以3，分类数据为总变量数的平方根。
+  
+  * 结果会输出每次迭代后的OOB值，越低越好。
+ 
+```{r,collapse=TRUE}
+# rfImpute填补缺失值
+# hd~. 其中hd为相应变量，.为其他所有变量，其意义为使用其他所有变量预测hd
+data.imputed <- rfImpute(hd ~ ., data = data, iter=6)
+
+model <- randomForest(hd ~ ., data=data.imputed, proximity=TRUE)
+
+model
+# proximity参数不是必须的，加上后，则会输出proximity矩阵，此矩阵可用于热图或MDS（PCoA）
+```
+
+# 四、评价
+ 
+ * model下err.rate中是OOB的数据，它有三列，分别是总OOB、健康人的OOB以及不健康人的OOB
+ * 创建数据框用于ggplot绘图
+ 
+ * importance()函数用于计算模型变量的重要性
+ 
+```{r,collapse=TRUE}
+oob.error.data <- data.frame(
+  Trees=rep(1:nrow(model$err.rate), times=3),
+  Type=rep(c("OOB", "Healthy", "Unhealthy"), each=nrow(model$err.rate)),
+  Error=c(model$err.rate[,"OOB"],
+          model$err.rate[,"Healthy"],
+          model$err.rate[,"Unhealthy"]))
+# 绘图
+ggplot(oob.error.data, aes(x=Trees, y=Error)) + geom_line(aes(color=Type))
+
+#importance()函数用于计算模型变量的重要性
+importance(model)
+varImpPlot(model)
+# 看出cp ca两个变量最重要
+```
+ 
+ 
+# 五、最优子集
+ 
+ * 默认子集数目为总变量数的平方跟，也就是13的平方根，约为3.6，所以默认的子集数目为3。
+ 
+ * 我们可以改变不同的子集数目以确认最佳子集数目是多少，比如可以看一下子集数目分别为1-10时的结果：
+ 
+ * 可以发现最低的OOB确实是子集数目为3。
+ 
+```{r,collapse=TRUE}
+oob.values <- vector(length=10)
+for (i in 1:10){
+  temp.model <- randomForest(hd~.,data = data.imputed,mtry=i)
+  oob.values[i] <- temp.model$err.rate[nrow(temp.model$err.rate),1]
+}
+oob.values
+```
+ 
+ 
+
